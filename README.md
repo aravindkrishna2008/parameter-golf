@@ -57,6 +57,17 @@ Happy training!
 
 ## Getting Started
 
+## Autoresearch Layout
+
+The root training path is now split into an autoresearch-friendly boundary:
+
+- `prepare.py` is the immutable runtime layer. It owns tokenizer loading, proxy vs authoritative dataset slices, validation bpb, compression, artifact accounting, and `results.jsonl` logging.
+- `train.py` is the only intended mutation surface. It owns model shape, optimizer settings, quantization/QAT hooks, and bounded contest tricks.
+- `train_gpt.py` remains as a compatibility entrypoint and delegates to `train.py`.
+- `program.md` defines the search objective, allowed mutation surface, tags, and promotion rules.
+
+The default fast-search mode is `SEARCH_STAGE=proxy`. Use `SEARCH_STAGE=authoritative` on the promotion machine when you want the full validation and packaging path.
+
 ### Training Your First Model (Mac with Apple Silicon)
 
 If you have an Apple laptop or desktop with Apple Silicon, we've set up a simple MLX training script to help you start iterating locally.
@@ -130,13 +141,15 @@ Launch your first training run. Note that we're passing `nproc_per_node=1` becau
 
 ```bash
 RUN_ID=baseline_sp1024 \
+SEARCH_STAGE=proxy \
 DATA_PATH=./data/datasets/fineweb10B_sp1024/ \
 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
 VOCAB_SIZE=1024 \
 torchrun --standalone --nproc_per_node=1 train_gpt.py
 ```
 
-By default, `train_gpt.py` keeps its ~10 minute wallclock cap. If you want a longer run, override it explicitly, for example `MAX_WALLCLOCK_SECONDS=0`.
+`SEARCH_STAGE=proxy` uses the fixed proxy shard/validation slice and shorter wallclock defaults for cheap iteration. For a full promotion-style run, switch to `SEARCH_STAGE=authoritative`.
+By default, `train_gpt.py` keeps the stage-specific wallclock cap. If you want a longer run, override it explicitly, for example `MAX_WALLCLOCK_SECONDS=0`.
 
 By default, this command prints `train_loss` step logs during training and prints `val_loss`, `val_bpb`, and compressed model size in the final `final_int8_zlib_roundtrip` lines at the end. If you want periodic validation logs during the run, set `VAL_LOSS_EVERY`, for example `VAL_LOSS_EVERY=200`. For the baseline config, the final `val_bpb` should land around ~1.2 with a compressed model size under 16MB.
 
@@ -148,7 +161,7 @@ Evaluation will be in the RunPod environment with all packages installed. `requi
 
 **What exactly counts toward the 16MB artifact size?**
 
-The submission artifact is computed as code bytes plus compressed model bytes. All counted code should live in the `train_gpt.py` script.
+The submission artifact is computed as code bytes plus compressed model bytes. In the root autoresearch path, code bytes are accounted across `prepare.py`, `train.py`, and `train_gpt.py`.
 The cap is decimal 16MB, i.e. 16,000,000 total bytes, not 16 MiB / 16,777,216 bytes.
 No external downloads, training dataset access, or network calls are allowed during evaluation. The artifact must be fully self-contained and reproducible.
 
