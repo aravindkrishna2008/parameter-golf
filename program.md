@@ -1,150 +1,166 @@
 # Parameter Golf Autoresearch Program
 
-## Objective Order
-
-1. `final_bpb`
-2. `artifact_bytes`
-3. training stability
-
-Lower is better for `final_bpb` and `artifact_bytes`.
-
-## Grounding
-
-This repository is intentionally grounded in the current winning small-Transformer family and in a quantization-first search strategy.
-
-- Start from an 11-layer decoder-only Transformer at `d_model=512`.
-- Use tied embeddings, RoPE, and GQA with 8 query heads and 4 KV heads.
-- Treat quantization and calibration as the main optimization axis.
-- Do not spend early search cycles on TTT or broader architecture replacement.
+This repository uses an upstream-style autoresearch loop adapted to the Parameter Golf evaluation rules.
 
 ## Immutable Boundary
 
-`prepare.py` is immutable and owns:
+Read these files before changing anything:
 
-- tokenizer choice
-- dataset slices
-- evaluation settings
-- compression
-- artifact-size accounting
-- shared utilities
-- result logging
+- `README.md` for contest context and launch commands.
+- `prepare.py` for the immutable runtime and evaluation harness.
+- `train.py` for the mutable model and training loop.
+- `autoresearch.py` for the immutable experiment driver.
 
-`train.py` is the only intended mutation surface.
+The boundary is strict:
 
-## Mutable Surface
+- Do not modify `prepare.py`.
+- Do not modify `autoresearch.py`.
+- Do not modify tokenizer choice, dataset slices, validation logic, compression, or artifact accounting from `train.py`.
+- Only modify `train.py` during the main search loop.
 
-`train.py` may change:
+Tokenizer work is allowed only on a clearly separate tokenizer branch, not in the main autoresearch branch.
 
-- model config
-- optimizer config
-- quantization hooks
-- QAT schedule
+## Objective Order
+
+1. Minimize `final_bpb`.
+2. Stay under the 16,000,000-byte artifact cap.
+3. Prefer simpler winning changes over equally good but more complex ones.
+
+Lower is better for `proxy_bpb`, `final_bpb`, and `artifact_bytes`.
+
+## Setup
+
+Start each fresh autoresearch run with:
+
+```bash
+python3 autoresearch.py setup --tag <tag>
+```
+
+If you want the driver to create the branch for you, use:
+
+```bash
+python3 autoresearch.py setup --tag <tag> --create-branch
+```
+
+The expected branch name is `autoresearch/<tag>`.
+
+The setup is not ready until all of the following are true:
+
+- `results.jsonl` exists.
+- the cached FineWeb shards exist under `data/datasets/fineweb10B_sp1024/`
+- the tokenizer exists at `data/tokenizers/fineweb_1024_bpe.model`
+
+If data is missing, fix the environment first. Do not start the loop until setup passes.
+
+## Main Loop
+
+The first run is always the unmodified baseline on the current `train.py`.
+
+Run one proxy experiment at a time with:
+
+```bash
+python3 autoresearch.py experiment \
+  --hypothesis-family quant \
+  --hypothesis-statement "Late QAT should improve compression without hurting proxy loss."
+```
+
+The driver is the source of truth for proxy decisions. It will:
+
+- run the current `train.py` in `SEARCH_STAGE=proxy`
+- write logs to `logs/<run_id>.driver.log`
+- read the appended `results.jsonl` row
+- compare the run against the current proxy champion
+- commit `train.py` if the run is a keep
+- restore `train.py` to `HEAD` if the run is a discard
+
+Do not hand-roll keep/discard logic outside the driver unless the driver explicitly says git actions were skipped.
+
+## Allowed Changes
+
+Within `train.py`, you may change:
+
+- model shape and allocation
+- optimizer settings
+- QAT and calibration strategy
 - one contest-specific trick at a time
 
-`train.py` may not change:
+Within the main branch, keep the search grounded in the current strong small-Transformer family:
 
-- tokenizer
-- dataset definition
-- validation logic
-- artifact accounting
-
-Tokenizer work must happen on a dedicated branch explicitly labeled as tokenizer work.
-
-## Search Environments
-
-### Proxy: Google Colab
-
-- `SEARCH_STAGE=proxy`
-- fixed proxy shard slice and proxy validation slice from `prepare.py`
-- short single-seed experiments
-- fixed wall-clock budget
-- report `proxy_bpb` and `artifact_bytes` every run
-
-### Authority: DigitalOcean Droplet
-
-- `SEARCH_STAGE=authoritative`
-- full tokenizer
-- full packaging pipeline
-- compressed artifact generation
-- fixed multi-seed promotion validation
-
-Do not validate every proxy win. Run one daily truth pass on the top 1-3 proxy candidates.
-
-## Search Ladder
-
-Run this ladder in order:
-
-1. `quant`
-Improve calibration and late-QAT scheduling first.
-
-2. `alloc`
-Tune parameter allocation under a fixed compressed budget: depth vs FFN width first, then GQA and KV ratio.
-
-3. `embed`
-Test embedding-efficiency changes like BigramHash only after the quantization stack is stable.
-
-4. `xsa`, `rope`, `prune`
-Test zero- or near-zero-parameter contest tricks one at a time.
-
-5. `openelm-fork`
-Test one clean OpenELM-derived fork: pre-norm RMSNorm, bias-free linears, SwiGLU, and non-uniform late-layer widening.
-
-Leave TTT and broader architectural departures out of the main branch until the quantization-first branch plateaus.
-
-## Run Rules
-
-- Every experiment must carry one or more tags from:
-  `quant`, `qat`, `alloc`, `embed`, `xsa`, `rope`, `prune`, `openelm-fork`, `optimizer`
-- The agent may change only one hypothesis family per run.
-- Every run must compare against the current champion.
-- Every run must explain the intended mechanism in one sentence.
-- Stop exploring a family after three non-improving proposals.
-- Merge policy is single-variable wins only.
-- Compound patches do not reach the champion branch unless each component already won in isolation.
-
-## Promotion Rules
-
-Promote a proxy candidate only if it:
-
-- improves the proxy champion by at least `0.003` proxy bpb, or
-- materially reduces compressed bytes at flat proxy loss
-
-Accept a new authoritative champion only if it:
-
-- fits under the artifact cap
-- wins on a fixed multi-seed average
-- survives the full packaging pipeline
-
-## Required Logging
-
-Every run must append a row to `results.jsonl` with:
-
-- `run_id`
-- `parent_id`
-- `hypothesis_family`
-- `config_hash`
-- `proxy_bpb`
-- `final_bpb`
-- `artifact_bytes`
-- `seed`
-- `status`
-
-## Baseline Discipline
-
-Baseline defaults should remain:
-
-- 11 layers
-- 512 model dim
+- baseline around 11 layers and `d_model=512`
 - tied embeddings
 - RoPE
 - 8 query heads / 4 KV heads
 - 3x FFN expansion
 
-Keep these toggles off until they win in isolation:
+Prioritize search families in this order:
 
-- BigramHash
-- XSA
-- partial RoPE
-- late QAT
-- selective pruning
-- OpenELM-style non-uniform widening
+1. `quant`
+2. `alloc`
+3. `embed`
+4. `xsa`, `rope`, `prune`
+5. `openelm-fork`
+
+Do not jump to TTT or broad architecture replacement until the quantization-first path clearly plateaus.
+
+## Run Rules
+
+- Every run needs a one-sentence mechanism via `--hypothesis-statement`.
+- Use one hypothesis family per run.
+- Prefer small, isolatable diffs.
+- Stop pushing a family after roughly three non-improving attempts.
+- A flat result with meaningfully smaller artifact bytes can still be a win.
+- If a result is basically tied, prefer the simpler code.
+
+## Promotion
+
+Proxy wins are cheap filters. They are not authoritative.
+
+Promote a candidate with the fixed seed set using:
+
+```bash
+python3 autoresearch.py promote \
+  --hypothesis-family quant \
+  --hypothesis-statement "Late QAT should improve compression without hurting final loss."
+```
+
+The promotion path is fixed:
+
+- `SEARCH_STAGE=authoritative`
+- seeds `42 1337 2025` by default
+- one `results.jsonl` row per seed run
+- one aggregate `promotion_summary` row appended after all seeds finish
+
+An authoritative champion must:
+
+- complete all promotion seeds
+- stay under the artifact cap on every seed
+- win on the fixed-seed average
+- survive the full packaging path
+
+## Logging And Status
+
+`results.jsonl` is the durable experiment ledger. Do not manually rewrite it.
+
+Useful commands:
+
+```bash
+python3 autoresearch.py status
+```
+
+This prints the current best proxy experiment and best authoritative promotion.
+
+## Failure Handling
+
+If a run crashes, read `logs/<run_id>.driver.log` and fix the failure in `train.py`.
+
+- If the crash is a simple bug, fix it and rerun.
+- If the idea is fundamentally bad, move on.
+- Do not edit the immutable runtime just to rescue a weak hypothesis.
+
+## Simplicity Criterion
+
+The goal is not to accumulate hacks. The goal is to find robust wins within the contest rules.
+
+- Keep a small gain if it is clean and understandable.
+- Reject a tiny gain if it adds disproportionate complexity.
+- Strongly prefer deletions, simplifications, or cleaner formulations when they preserve quality.
