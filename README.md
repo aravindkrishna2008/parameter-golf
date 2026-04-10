@@ -64,9 +64,42 @@ The root training path is now split into an autoresearch-friendly boundary:
 - `prepare.py` is the immutable runtime layer. It owns tokenizer loading, proxy vs authoritative dataset slices, validation bpb, compression, artifact accounting, and `results.jsonl` logging.
 - `train.py` is the only intended mutation surface. It owns model shape, optimizer settings, quantization/QAT hooks, and bounded contest tricks.
 - `train_gpt.py` remains as a compatibility entrypoint and delegates to `train.py`.
-- `program.md` defines the search objective, allowed mutation surface, tags, and promotion rules.
+- `autoresearch.py` is the immutable driver for setup checks, proxy keep/discard decisions, and fixed-seed authoritative promotion.
+- `program.md` defines the operating protocol for the search loop.
 
 The default fast-search mode is `SEARCH_STAGE=proxy`. Use `SEARCH_STAGE=authoritative` on the promotion machine when you want the full validation and packaging path.
+
+### Autoresearch Workflow
+
+The intended loop now follows the upstream `karpathy/autoresearch` style more closely, but stays grounded in Parameter Golf's artifact and evaluation rules.
+
+Set up a fresh search branch and validate the local cache:
+
+```bash
+python3 autoresearch.py setup --tag apr09 --create-branch
+```
+
+Run one proxy experiment from the current `train.py` and let the driver decide whether to keep or discard it:
+
+```bash
+python3 autoresearch.py experiment \
+  --hypothesis-family quant \
+  --hypothesis-statement "Late QAT should improve compression without hurting proxy loss."
+```
+
+When a proxy candidate looks good, run the fixed authoritative promotion pass:
+
+```bash
+python3 autoresearch.py promote \
+  --hypothesis-family quant \
+  --hypothesis-statement "Late QAT should improve compression without hurting final loss."
+```
+
+Check the current champions at any point with:
+
+```bash
+python3 autoresearch.py status
+```
 
 ### Training Your First Model (Mac with Apple Silicon)
 
